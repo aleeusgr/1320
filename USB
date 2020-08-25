@@ -1,0 +1,157 @@
+#!/bin/bash
+# script is based on github/mdaffin arch-installer`
+# WARNING: this script will destroy data on the selected disk.
+# This script can be run by executing the following:
+
+set -uo pipefail  # set up root frame
+trap 's=$?; echo "$0: Error on line "$LINENO": $BASH_COMMAND"; exit $s' ERR # read IO and save?
+
+REPO_URL="https://pkgbuild.com/~dvzrv/repo/\$arch/" #linux-rt
+MIRRORLIST_URL="https://www.archlinux.org/mirrorlist/?country=GB&protocol=https&use_mirror_status=on"
+
+pacman -Sy --noconfirm pacman-contrib
+
+echo "Updating mirror list"
+curl -s "$MIRRORLIST_URL" | \
+    sed -e 's/^#Server/Server/' -e '/^#/d' | \
+    rankmirrors -n 5 - > /etc/pacman.d/mirrorlist
+
+### Get infomation from user ###
+#hostname=$(dialog --stdout --inputbox "Enter hostname" 0 0) || exit 1
+#clear
+#: ${hostname:?"hostname cannot be empty"}
+#
+#user=$(dialog --stdout --inputbox "Enter admin username" 0 0) || exit 1
+#clear
+#: ${user:?"user cannot be empty"}
+#
+#password=$(dialog --stdout --passwordbox "Enter admin password" 0 0) || exit 1
+#clear
+#: ${password:?"password cannot be empty"}
+#password2=$(dialog --stdout --passwordbox "Enter admin password again" 0 0) || exit 1
+#clear
+#[[ "$password" == "$password2" ]] || ( echo "Passwords did not match"; exit 1; )
+
+hostname=1320
+user=admin
+password=admin
+devicelist=$(lsblk -dplnx size -o name,size | grep -Ev "boot|rpmb|loop" | tac)
+device=$(dialog --stdout --menu "Select installtion disk" 0 0 0 ${devicelist}) || exit 1
+i#device=/dev/sda
+
+clear
+
+### Set up logging ###
+exec 1> >(tee "stdout.log")
+exec 2> >(tee "stderr.log")
+
+timedatectl set-ntp true
+
+### Setup the disk and partitions ###
+swap_size=$(free --mebi | awk '/Mem:/ {print $2}')
+swap_end=$(( $swap_size + 129 + 1 ))MiB
+
+parted --script "${device}" \
+  mklabel msdos \
+  # mkpart fat32 1Mib 129MiB \
+  set 1 boot on \
+  mkpart primary linux-swap 1Mib ${swap_end} \
+  mkpart primary ext4 ${swap_end} 31Gib
+
+# Simple globbing was not enough as on one device I needed to match /dev/mmcblk0p1 
+# but not /dev/mmcblk0boot1 while being able to match /dev/sda1 on other devices.
+#part_boot="$(ls ${device}* | grep -E "^${device}p?1$")"
+part_swap="$(ls ${device}* | grep -E "^${device}p?1$")"
+part_root="$(ls ${device}* | grep -E "^${device}p?2$")"
+
+#wipefs "${part_boot}"
+wipefs "${part_swap}"
+wipefs "${part_root}"
+
+#mkfs.vfat -F32 "${part_boot}"
+mkswap "${part_swap}"
+mkfs.f2fs -f "${part_root}"
+
+swapon "${part_swap}"
+mount "${part_root}" /mnt
+#mkdir /mnt/boot
+#mount "${part_boot}" /mnt/boot
+
+### Install and configure the basic system ###
+cat >>/etc/pacman.conf <<EOF
+[dvzrv]
+SigLevel = Optional TrustAll
+Server = $REPO_URL 
+EOF
+
+pacstrap /mnt base linux-rt linux-firmware 
+genfstab -t PARTUUID /mnt >> /mnt/etc/fstab
+
+cat >>/mnt/etc/pacman.conf <<EOF
+[dvzrv]
+SigLevel = Optional TrustAll
+Server = $REPO_URL
+EOF
+
+#arch-chroot /mnt 
+#bootctl install 
+
+ln -sf /usr/share/zoneinfo/Europe/Moscow /mnt/etc/localtime
+hwclock --systohc
+
+cat >>/mnt/etc/locale.gen << EOF
+en_US.UTF-8 UTF-8
+ru_RU.UTF-8 UTF-8
+EOF
+
+locale-gen
+
+echo "${hostname}" > /mnt/etc/hostname
+  
+cat >>/mnt/etc/hosts << EOF
+127.0.0.1	localhost
+::1		localhost
+127.0.1.1	 "${hostname}".localdomain	 "${hostname}"
+EOF
+
+#echo "LANG=en_US.UTF-8" > /mnt/etc/locale.conf
+
+arch-chroot /mnt useradd -mU -s /usr/bin/bash -G wheel,uucp,video,audio,storage,games,input "$user"
+arch-chroot /mnt chsh -s /usr/bin/bash
+arch-chroot /mnt
+
+echo "$user:$password" | chpasswd --root /mnt
+echo "root:$password" | chpasswd --root /mnt
+
+#pacman -S grub b43-frimware --noconfirm
+#grub-install --target=i386-pc '/dev/sda/' 
+
+
+
+#MEMOS:
+#https://wiki.archlinux.org/index.php/Installation_guide
+#https://wiki.archlinux.org/index.php/General_recommendations
+#https://wiki.archlinux.org/index.php/Kernel
+#https://wiki.archlinux.org/index.php/Network_configuration
+#https://wiki.archlinux.org/index.php/Professional_audio
+#https://wiki.archlinux.org/index.php/JACK_Audio_Connection_Kit
+#https://wiki.archlinux.org/index.php/Xorg
+#ihttps://github.com/vishnubob/python-midi
+#https://unix.stackexchange.com/questions/27050/how-to-start-an-application-on-a-different-workspace
+ 
+#APPS:
+#https://github.com/nodiscc/awesome-linuxaudio/
+#MIXXX
+#mididings // python midi
+#sampler
+#mixer
+#sequencer 
+#synth
+#Effect rack
+
+# Bells and Whistles:
+# Fast fourier transform visuals
+# Change partitioning to a more reasonable version. / = 30Gb
+# Autostart script: launch apps, scale GUIs (QT_SCALE_FACTOR=1.5 hydrogen), sort apps by workspace.
+# How to control system GUI with midi-controller? Navigate folders, select files. 
+
